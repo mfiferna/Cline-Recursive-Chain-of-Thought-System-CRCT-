@@ -61,6 +61,8 @@ def get_file_type(file_path: str) -> str:
         return "html"
     elif ext == ".css":
         return "css"
+    elif ext == ".cs":
+        return "cs"
     else:
         return "generic"
 

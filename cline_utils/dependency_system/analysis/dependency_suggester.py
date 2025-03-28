@@ -74,6 +74,8 @@ def suggest_dependencies(file_path: str, key_map: Dict[str, str], project_root: 
         return suggest_javascript_dependencies(norm_path, key_map, project_root, threshold)
     elif file_ext in ('.md', '.rst'):
         return suggest_documentation_dependencies(norm_path, key_map, project_root, threshold)
+    elif file_ext == '.cs':
+        return suggest_csharp_dependencies(norm_path, key_map, project_root, threshold)
     else:
         return suggest_generic_dependencies(norm_path, key_map, project_root, threshold)
 
@@ -147,6 +149,32 @@ def suggest_documentation_dependencies(file_path: str, key_map: Dict[str, str], 
     explicit_deps = _identify_markdown_dependencies(file_path, analysis, {k: analyze_file(v) for k, v in key_map.items()}, project_root)
     explicit_suggestions = [(key_map.get(dep_path), 1.0) for dep_path, _ in explicit_deps if dep_path in key_map]
 
+    semantic_suggestions = suggest_semantic_dependencies(file_path, key_map, project_root, threshold)
+
+    return _combine_suggestions(explicit_suggestions + semantic_suggestions)
+
+def suggest_csharp_dependencies(file_path: str, key_map: Dict[str, str], project_root: str, threshold: float) -> List[Tuple[str, float]]:
+    """
+    Suggest dependencies for a C# file.
+
+    Args:
+        file_path: Path to the C# file (normalized)
+        key_map: Dictionary mapping keys to file paths
+        project_root: Root directory of the project
+        threshold: Confidence threshold for suggestions
+    Returns:
+        List of (dependency_key, confidence) tuples
+    """
+    # Analyze file for explicit dependencies
+    analysis = analyze_file(file_path)
+    if "error" in analysis:
+        logger.warning(f"Failed to analyze {file_path}: {analysis['error']}")
+        return []
+
+    explicit_deps = _identify_csharp_dependencies(file_path, analysis, {k: analyze_file(v) for k, v in key_map.items()}, project_root)
+    explicit_suggestions = [(key_map.get(dep_path), 1.0) for dep_path, _ in explicit_deps if dep_path in key_map]
+
+    # Get semantic dependencies
     semantic_suggestions = suggest_semantic_dependencies(file_path, key_map, project_root, threshold)
 
     return _combine_suggestions(explicit_suggestions + semantic_suggestions)
@@ -322,6 +350,7 @@ def _combine_suggestions(suggestions: List[Tuple[Optional[str], float]]) -> List
 from cline_utils.dependency_system.analysis.dependency_analyzer import (
     _identify_python_dependencies,
     _identify_javascript_dependencies,
-    _identify_markdown_dependencies
+    _identify_markdown_dependencies,
+    _identify_csharp_dependencies
 )
 # End of file

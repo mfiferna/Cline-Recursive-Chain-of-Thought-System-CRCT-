@@ -31,6 +31,7 @@ JAVASCRIPT_IMPORT_PATTERN = re.compile(
 MARKDOWN_LINK_PATTERN = re.compile(r'\[([^\]]+)\]\(([^)]+)\)')
 HTML_LINK_PATTERN = re.compile(r'<a\s+(?:[^>]*?\s+)?href=(["\'])([^"\']+)\1')
 CSS_IMPORT_PATTERN = re.compile(r'@import\s+(?:url\s*\(\s*)?["\']?([^"\')\s]+)["\']?(?:\s*\))?')
+CSHARP_IMPORT_PATTERN = re.compile(r'using\s+([a-zA-Z0-9_.]+);')
 
 @cached('analysis', key_func=lambda file_path: f"file_type:{file_path}:{os.path.getmtime(file_path) if os.path.exists(file_path) else str(uuid.uuid4())}")
 def get_file_type(file_path: str) -> str:
@@ -53,7 +54,8 @@ def get_file_type(file_path: str) -> str:
         "js": "js", "ts": "js", "jsx": "js", "tsx": "js",
         "md": "md", "rst": "md",
         "html": "html", "htm": "html",
-        "css": "css"
+        "css": "css",
+        "cs": "cs"
     }.get(ext, "generic")
 
 @cached('analysis', 
@@ -95,6 +97,8 @@ def analyze_file(file_path: str) -> Dict[str, Any]:
             _analyze_html_file(file_path, analysis_result)
         elif file_type == "css":
             _analyze_css_file(file_path, analysis_result)
+        elif file_type == "cs":
+            _analyze_csharp_file(file_path, analysis_result)
         
         return analysis_result
     except FileNotFoundError:
@@ -317,6 +321,47 @@ def _analyze_css_file(file_path: str, result: Dict[str, Any]) -> None:
     except Exception as e:
         logger.error(f"Unexpected error analyzing CSS file {file_path}: {str(e)}")
 
+def _analyze_csharp_file(file_path: str, result: Dict[str, Any]) -> None:
+    """
+    Analyzes a C# file for imports, classes, methods, and references.
+    
+    Args:
+        file_path: Path to the C# file
+        result: Dictionary to store analysis results (modified in-place)
+    """
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+        
+        # Extract imports using regex
+        import_matches = CSHARP_IMPORT_PATTERN.findall(content)
+        result["imports"] = [match for match in import_matches]
+        
+        # Extract classes and methods using regex
+        class_pattern = re.compile(r'class\s+([a-zA-Z0-9_]+)')
+        method_pattern = re.compile(r'(public|private|protected|internal)?\s*(static)?\s*([a-zA-Z0-9_<>]+)\s+([a-zA-Z0-9_]+)\s*\(([^)]*)\)')
+        result["classes"] = [
+            {"name": match, "line": content[:content.find(f"class {match}")].count('\n') + 1}
+            for match in class_pattern.findall(content)
+        ]
+        result["methods"] = [
+            {"name": match[3], "return_type": match[2], "args": match[4].split(','), "line": content[:content.find(f"{match[2]} {match[3]}")].count('\n') + 1}
+            for match in method_pattern.findall(content)
+        ]
+        
+        # Extract references (variables, attributes)
+        reference_pattern = re.compile(r'\b([a-zA-Z0-9_]+)\b')
+        result["references"] = [
+            {"name": match, "line": content[:content.find(match)].count('\n') + 1}
+            for match in reference_pattern.findall(content)
+        ]
+    except FileNotFoundError:
+        logger.error(f"File not found: {file_path}")
+    except UnicodeDecodeError as e:
+        logger.error(f"Encoding error in {file_path}: {str(e)}")
+    except Exception as e:
+        logger.error(f"Unexpected error analyzing C# file {file_path}: {str(e)}")
+
 @cached('analysis', 
         key_func=lambda project_dir, tracker_file=None: 
         f"analyze_project:{project_dir}:{os.path.getmtime(tracker_file) if tracker_file and os.path.exists(tracker_file) else str(uuid.uuid4())}")
@@ -412,6 +457,8 @@ def _identify_dependencies(source_path: str, source_analysis: Dict[str, Any],
         dependencies.extend(_identify_html_dependencies(source_path, source_analysis, file_analyses, project_dir))
     elif file_type == "css":
         dependencies.extend(_identify_css_dependencies(source_path, source_analysis, file_analyses, project_dir))
+    elif file_type == "cs":
+        dependencies.extend(_identify_csharp_dependencies(source_path, source_analysis, file_analyses, project_dir))
     
     # Optional directory-based dependencies (configurable)
     config = ConfigManager()
@@ -662,6 +709,58 @@ def _identify_css_dependencies(source_path: str, source_analysis: Dict[str, Any]
                 break
     
     return dependencies
+
+def _identify_csharp_dependencies(source_path: str, source_analysis: Dict[str, Any],
+                                file_analyses: Dict[str, Dict[str, Any]], 
+                                project_dir: str) -> List[Tuple[str, str]]:
+    """
+    Identifies dependencies from a C# file to other files in the project.
+    
+    Args:
+        source_path: Path to the source file
+        source_analysis: Analysis results for the source file
+        file_analyses: Dictionary of file paths to their analysis results
+        project_dir: Root project directory path
+    Returns:
+        List of tuples (dependent_file_path, dependency_type)
+    """
+    dependencies = []
+    imports = source_analysis.get("imports", [])
+    source_dir = os.path.dirname(source_path)
+    
+    for import_name in imports:
+        # Convert import to possible file paths
+        possible_paths = _convert_csharp_import_to_paths(import_name, source_dir, project_dir)
+        # Check if any of the possible paths exist in the analyzed files
+        for path in possible_paths:
+            normalized_path = normalize_path(path)
+            for target_path in file_analyses:
+                if normalized_path == normalize_path(target_path):
+                    dependencies.append((target_path, ">"))  # Strong dependency
+                    break
+    return dependencies
+
+def _convert_csharp_import_to_paths(import_name: str, source_dir: str, project_dir: str) -> List[str]:
+    """
+    Converts a C# import statement to potential file paths.
+    
+    Args:
+        import_name: The import name (e.g., 'System.IO', 'MyNamespace.MyClass')
+        source_dir: Directory of the source file
+        project_dir: Root project directory
+    Returns:
+        List of potential file paths that could match the import
+    """
+    potential_paths = []
+    import_path = import_name.replace('.', os.sep)
+    potential_paths.extend([
+        os.path.join(source_dir, f"{import_path}.cs"),
+        os.path.join(source_dir, import_path, "__init__.cs"),
+        os.path.join(project_dir, f"{import_path}.cs"),
+        os.path.join(project_dir, import_path, "__init__.cs")
+    ])
+    
+    return potential_paths
 
 def _resolve_relative_path(path: str, source_dir: str, project_dir: str) -> str:
     """
